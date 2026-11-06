@@ -1,0 +1,35 @@
+{
+  "name": "doodle-crimes",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch server/index.ts",
+    "dev:socket": "tsx watch server/socket-only.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "start:socket": "NODE_ENV=production tsx server/socket-only.ts",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/copy-gif-worker.mjs"
+  },
+  "dependencies": {
+    "gif.js": "0.2.0",
+    "nanoid": "5.1.16",
+    "next": "16.4.5",
+    "perfect-freehand": "1.2.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "socket.io": "4.8.1",
+    "socket.io-client": "4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.9",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.5.32",
+    "tailwindcss": "3.4.15",
+    "tsx": "4.23.15",
+    "typescript": "5.6.3"
+  }
+}
