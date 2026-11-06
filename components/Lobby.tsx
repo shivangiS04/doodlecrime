@@ -120,6 +120,33 @@ export function Lobby({ roomState, isHost }: { roomState: RoomStatePublic; isHos
               />
             </label>
 
+            <label className="flex items-center justify-between text-sm">
+              Bribe Economy (Dirty Ink)
+              <input
+                type="checkbox"
+                checked={roomState.settings.bribeEconomyEnabled}
+                onChange={(e) => updateSettings({ bribeEconomyEnabled: e.target.checked })}
+              />
+            </label>
+
+            <label className="flex items-center justify-between text-sm">
+              Alibi Mode (two drawers)
+              <input
+                type="checkbox"
+                checked={roomState.settings.alibiModeEnabled}
+                onChange={(e) => updateSettings({ alibiModeEnabled: e.target.checked })}
+              />
+            </label>
+
+            <label className="flex items-center justify-between text-sm">
+              The Trial (AI judge, end of game)
+              <input
+                type="checkbox"
+                checked={roomState.settings.trialEnabled}
+                onChange={(e) => updateSettings({ trialEnabled: e.target.checked })}
+              />
+            </label>
+
             {roomState.settings.promptPack === "custom" && (
               <div>
                 <textarea

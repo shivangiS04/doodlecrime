@@ -1,22 +1,30 @@
 import { nanoid } from "nanoid";
 import {
   Avatar,
+  AlibiVoteState,
+  BRIBE_COSTS,
+  CanvasId,
   ChatEntry,
+  DIRTY_INK_PER_GUESS,
   DrawingAction,
   GamePhase,
   PlayerPublic,
   RoomSettings,
   RoomStatePublic,
   ScoreDelta,
+  ScoreReason,
   SentenceId,
   SENTENCE_IDS,
   SnitchVoteState,
+  TrialStage,
+  TrialVerdict,
   TurnRecording,
   DEFAULT_SETTINGS,
 } from "./types";
 import { matchGuess } from "./guessMatch";
 import { drawerPoints, guessPoints } from "./scoring";
-import { pickWordChoices } from "./prompts";
+import { pickWordChoices, PROMPT_PACKS } from "./prompts";
+import { generateVerdicts } from "./trialJudge";
 
 const RECONNECT_GRACE_MS = 60_000;
 const PICK_WORD_DEADLINE_MS = 12_000;
@@ -26,7 +34,15 @@ const SNITCH_REVEAL_PAUSE_MS = 4_000;
 const SABOTAGE_WINDOW_MS = 3_000;
 const SNITCH_ACCUSER_POINTS = 60;
 const SNITCH_SURVIVOR_POINTS = 90;
+const ALIBI_VOTE_MS = 9_000;
+const ALIBI_REVEAL_PAUSE_MS = 4_000;
+const ALIBI_ACCUSER_POINTS = 60;
+const ALIBI_SURVIVOR_POINTS = 90;
+const BRIBE_CATCH_CHANCE = 0.2;
 const LETTER_HINT_COUNT = 4;
+const TRIAL_VOTE_MS = 20_000;
+const TRIAL_DEFENSE_MS = 15_000;
+const TRIAL_AUTO_CONTINUE_MS = 45_000;
 
 interface PlayerInternal {
   id: string;
@@ -34,11 +50,14 @@ interface PlayerInternal {
   nickname: string;
   avatar: Avatar;
   score: number;
+  dirtyInk: number;
   isHost: boolean;
   connected: boolean;
   seat: number;
   guessedThisTurn: boolean;
   guessedAtMs: number | null;
+  guessScoreForDisplay: number | null;
+  guessScoreReason: ScoreReason;
   disconnectTimer: NodeJS.Timeout | null;
 }
 
@@ -53,6 +72,7 @@ export interface RoomCallbacks {
   onSfx: (name: "typewriter" | "gavel" | "shutter" | "stamp" | "tada" | "snitch") => void;
   onPlayerRemoved: (playerId: string) => void;
   onSnitchAssigned: (playerId: string, sabotageWindowMs: number) => void;
+  onAlibiAssigned: (playerId: string, category: string) => void;
 }
 
 export class Room {
@@ -73,6 +93,7 @@ export class Room {
 
   turnEndsAt: number | null = null;
   drawingHistory: DrawingAction[] = [];
+  drawingHistoryB: DrawingAction[] = [];
   evidenceTape: TurnRecording[] = [];
 
   // Sentences (drawer handicaps)
@@ -87,11 +108,31 @@ export class Room {
   snitchVoteOpen = false;
   snitchVoteDeadline: number | null = null;
 
+  // Alibi Mode
+  aliasDrawerId: string | null = null;
+  alibiVotes: Map<string, string> = new Map();
+  alibiVoteOpen = false;
+  alibiVoteDeadline: number | null = null;
+
+  // Bribe Economy
+  pendingCurse: Map<string, SentenceId> = new Map();
+  pendingBribe: Set<string> = new Set();
+
+  // The Trial
+  trialStage: TrialStage = null;
+  trialDeadline: number | null = null;
+  trialVotes: Map<string, string> = new Map();
+  trialDefendants: string[] = [];
+  trialDefenseIndex = 0;
+  trialDefenses: Record<string, string> = {};
+  trialVerdicts: TrialVerdict[] | null = null;
+
   lastRoundReveal: {
     word: string;
     deltas: ScoreDelta[];
     recording: TurnRecording | null;
     snitchReveal: { snitchId: string; nickname: string; caught: boolean } | null;
+    alibiReveal: { fakeId: string; nickname: string; caught: boolean } | null;
   } | null = null;
   finalScoreboard: PlayerPublic[] | null = null;
 
@@ -143,6 +184,7 @@ export class Room {
         nickname: p.nickname,
         avatar: p.avatar,
         score: p.score,
+        dirtyInk: p.dirtyInk,
         isHost: p.isHost,
         connected: p.connected,
         guessedThisTurn: p.guessedThisTurn,
@@ -157,6 +199,14 @@ export class Room {
         }
       : null;
 
+    const alibiVote: AlibiVoteState | null = this.alibiVoteOpen
+      ? {
+          active: true,
+          deadline: this.alibiVoteDeadline!,
+          eligibleVoterIds: this.guessers.filter((p) => p.id !== this.aliasDrawerId).map((p) => p.id),
+        }
+      : null;
+
     return {
       code: this.code,
       phase: this.phase,
@@ -167,14 +217,22 @@ export class Room {
       turnIndex: this.turnIndex,
       currentDrawerId: this.currentDrawerId,
       activeDrawerId: this.getActiveDrawerId(),
+      aliasDrawerId: this.aliasDrawerId,
       turnStartedAt: this.turnEndsAt ? this.turnEndsAt - this.settings.drawTimeSec * 1000 : null,
       wordLength: this.wordLength,
       revealedMask: this.getRevealedMask(),
       turnEndsAt: this.turnEndsAt,
       currentSentence: this.currentSentence,
       snitchVote,
+      alibiVote,
       lastRoundReveal: this.lastRoundReveal,
       finalScoreboard: this.finalScoreboard,
+      trialStage: this.trialStage,
+      trialDeadline: this.trialDeadline,
+      trialDefendants: this.trialDefendants,
+      trialCurrentDefendantId: this.trialDefendants[this.trialDefenseIndex] ?? null,
+      trialDefenses: this.trialDefenses,
+      trialVerdicts: this.trialVerdicts,
     };
   }
 
@@ -207,11 +265,14 @@ export class Room {
       nickname,
       avatar,
       score: 0,
+      dirtyInk: 0,
       isHost: isFirst,
       connected: true,
       seat: this.nextSeat++,
       guessedThisTurn: false,
       guessedAtMs: null,
+      guessScoreForDisplay: null,
+      guessScoreReason: "guess",
       disconnectTimer: null,
     };
     this.players.set(id, player);
@@ -296,6 +357,9 @@ export class Room {
     this.turnIndex = 0;
     this.usedWords.clear();
     this.evidenceTape = [];
+    this.pendingCurse.clear();
+    this.pendingBribe.clear();
+    this.resetTrialState();
     for (const p of this.players.values()) p.score = 0;
     this.turnOrder = [...this.players.keys()].sort(() => Math.random() - 0.5);
     this.finalScoreboard = null;
@@ -305,16 +369,19 @@ export class Room {
   private beginTurn() {
     this.clearAllTimers();
     this.drawingHistory = [];
+    this.drawingHistoryB = [];
     this.revealedIndices.clear();
     this.secretWord = null;
     this.wordLength = null;
     this.lastRoundReveal = null;
     this.currentSentence = null;
     this.resetSnitchState();
+    this.resetAlibiState();
 
     for (const p of this.players.values()) {
       p.guessedThisTurn = false;
       p.guessedAtMs = null;
+      p.guessScoreForDisplay = null;
     }
 
     this.currentDrawerId = this.turnOrder[this.turnIndex] ?? null;
@@ -345,6 +412,23 @@ export class Room {
     this.snitchVoteDeadline = null;
   }
 
+  private resetAlibiState() {
+    this.aliasDrawerId = null;
+    this.alibiVotes.clear();
+    this.alibiVoteOpen = false;
+    this.alibiVoteDeadline = null;
+  }
+
+  private resetTrialState() {
+    this.trialStage = null;
+    this.trialDeadline = null;
+    this.trialVotes.clear();
+    this.trialDefendants = [];
+    this.trialDefenseIndex = 0;
+    this.trialDefenses = {};
+    this.trialVerdicts = null;
+  }
+
   chooseWord(playerId: string, word: string) {
     if (this.phase !== "PICK_WORD" || playerId !== this.currentDrawerId) return;
     this.clearAllTimers();
@@ -356,11 +440,17 @@ export class Room {
     const durationMs = this.settings.drawTimeSec * 1000;
     this.turnEndsAt = Date.now() + durationMs;
 
-    if (this.settings.sentencesEnabled) {
+    const curse = this.pendingCurse.get(playerId);
+    if (curse) {
+      this.currentSentence = curse;
+      this.pendingCurse.delete(playerId);
+      this.cb.onSfx("stamp");
+    } else if (this.settings.sentencesEnabled) {
       this.currentSentence = SENTENCE_IDS[Math.floor(Math.random() * SENTENCE_IDS.length)];
       this.cb.onSfx("stamp");
     }
     this.assignSnitchIfEnabled();
+    this.assignAlibiIfEnabled();
 
     this.scheduleLetterHints(durationMs);
     this.setTimer(() => this.endTurn(), durationMs);
@@ -374,6 +464,17 @@ export class Room {
     const snitch = candidates[Math.floor(Math.random() * candidates.length)];
     this.currentSnitchId = snitch.id;
     this.cb.onSnitchAssigned(snitch.id, SABOTAGE_WINDOW_MS);
+  }
+
+  private assignAlibiIfEnabled() {
+    if (!this.settings.alibiModeEnabled) return;
+    const candidates = this.guessers;
+    if (candidates.length < 1) return;
+    const fake = candidates[Math.floor(Math.random() * candidates.length)];
+    this.aliasDrawerId = fake.id;
+    const pack = PROMPT_PACKS[this.settings.promptPack];
+    const category = pack ? pack.name : this.settings.promptPack === "custom" ? "Custom Words" : "Mystery Category";
+    this.cb.onAlibiAssigned(fake.id, category);
   }
 
   activateSabotage(playerId: string) {
@@ -413,6 +514,68 @@ export class Room {
     this.snitchVotes.set(voterId, targetPlayerId);
   }
 
+  castAlibiVote(voterId: string, targetPlayerId: string) {
+    if (!this.alibiVoteOpen) return;
+    if (voterId === this.currentDrawerId || voterId === this.aliasDrawerId) return;
+    if (!this.players.has(targetPlayerId)) return;
+    this.alibiVotes.set(voterId, targetPlayerId);
+  }
+
+  // ---------- Bribe Economy ----------
+
+  buyLetterHint(playerId: string) {
+    if (!this.settings.bribeEconomyEnabled || this.phase !== "DRAWING" || !this.secretWord) return;
+    const player = this.players.get(playerId);
+    if (!player || playerId === this.getActiveDrawerId() || player.dirtyInk < BRIBE_COSTS.letterHint) return;
+
+    const hiddenIndices = this.secretWord
+      .split("")
+      .map((ch, i) => (ch !== " " && !this.revealedIndices.has(i) ? i : -1))
+      .filter((i) => i >= 0);
+    if (hiddenIndices.length === 0) {
+      this.cb.onPrivateHint(playerId, "There's nothing left to reveal!");
+      return;
+    }
+
+    player.dirtyInk -= BRIBE_COSTS.letterHint;
+    const idx = hiddenIndices[Math.floor(Math.random() * hiddenIndices.length)];
+    this.cb.onPrivateHint(playerId, `Private tip: letter ${idx + 1} is "${this.secretWord[idx]}".`);
+    this.notify();
+  }
+
+  curseLeader(playerId: string) {
+    if (!this.settings.bribeEconomyEnabled) return;
+    if (this.phase === "LOBBY" || this.phase === "GAME_OVER" || this.phase === "TRIAL") return;
+    const buyer = this.players.get(playerId);
+    if (!buyer || buyer.dirtyInk < BRIBE_COSTS.curseLeader) return;
+
+    const leader = [...this.players.values()].sort((a, b) => b.score - a.score)[0];
+    if (!leader || leader.id === playerId) {
+      this.cb.onPrivateHint(playerId, "You're already in the lead — nobody to curse!");
+      return;
+    }
+
+    buyer.dirtyInk -= BRIBE_COSTS.curseLeader;
+    const sentence = SENTENCE_IDS[Math.floor(Math.random() * SENTENCE_IDS.length)];
+    this.pendingCurse.set(leader.id, sentence);
+    this.systemChat(`${buyer.nickname} cursed ${leader.nickname}! Their next turn won't be easy...`);
+    this.cb.onSfx("stamp");
+    this.notify();
+  }
+
+  bribeJudge(playerId: string) {
+    if (!this.settings.bribeEconomyEnabled) return;
+    if (this.phase === "LOBBY" || this.phase === "GAME_OVER" || this.phase === "TRIAL") return;
+    const buyer = this.players.get(playerId);
+    if (!buyer || buyer.dirtyInk < BRIBE_COSTS.bribeJudge || this.pendingBribe.has(playerId)) return;
+
+    buyer.dirtyInk -= BRIBE_COSTS.bribeJudge;
+    this.pendingBribe.add(playerId);
+    this.cb.onPrivateHint(playerId, "Bribe placed. Fingers crossed...");
+    this.cb.onSfx("stamp");
+    this.notify();
+  }
+
   private scheduleLetterHints(durationMs: number) {
     if (!this.secretWord) return;
     const letterIndices = this.secretWord
@@ -448,10 +611,28 @@ export class Room {
 
     if (result === "correct") {
       const elapsed = Date.now() - (this.turnEndsAt! - this.settings.drawTimeSec * 1000);
-      const points = guessPoints(elapsed, this.settings.drawTimeSec * 1000);
+      let points = guessPoints(elapsed, this.settings.drawTimeSec * 1000);
+      let reason: ScoreReason = "guess";
+
+      if (this.settings.bribeEconomyEnabled && this.pendingBribe.has(playerId)) {
+        this.pendingBribe.delete(playerId);
+        if (Math.random() < BRIBE_CATCH_CHANCE) {
+          points = 0;
+          this.systemChat(`${player.nickname}'s bribe was discovered by the judge! No points this round.`);
+          reason = "bribe-caught";
+        } else {
+          points *= 2;
+          this.systemChat(`${player.nickname}'s bribe paid off — double points!`);
+          reason = "bribe-payoff";
+        }
+      }
+
       player.score += points;
+      player.dirtyInk += DIRTY_INK_PER_GUESS;
       player.guessedThisTurn = true;
       player.guessedAtMs = Date.now();
+      player.guessScoreForDisplay = points;
+      player.guessScoreReason = reason;
 
       this.cb.onChat({ ...entry, text: `${player.nickname} guessed the word!`, guess: "correct" });
       this.cb.onSfx("shutter");
@@ -499,17 +680,16 @@ export class Room {
     const deltas: ScoreDelta[] = [];
 
     for (const p of this.guessers) {
-      if (p.guessedThisTurn && p.guessedAtMs != null) {
-        const elapsed = p.guessedAtMs - (this.turnEndsAt! - this.settings.drawTimeSec * 1000);
+      if (p.guessedThisTurn && p.guessScoreForDisplay != null && p.guessScoreForDisplay > 0) {
         deltas.push({
           playerId: p.id,
           nickname: p.nickname,
-          points: guessPoints(elapsed, this.settings.drawTimeSec * 1000),
-          reason: "guess",
+          points: p.guessScoreForDisplay,
+          reason: p.guessScoreReason,
         });
       }
     }
-    const correctCount = deltas.length;
+    const correctCount = this.guessers.filter((p) => p.guessedThisTurn).length;
     if (this.currentDrawerId && correctCount > 0) {
       const drawer = this.players.get(this.currentDrawerId);
       if (drawer) {
@@ -527,23 +707,36 @@ export class Room {
 
     this.phase = "ROUND_REVEAL";
     this.turnEndsAt = null;
-    this.lastRoundReveal = { word, deltas, recording, snitchReveal: null };
+    this.lastRoundReveal = { word, deltas, recording, snitchReveal: null, alibiReveal: null };
     this.cb.onRoundReveal(word, deltas, recording);
     this.cb.onSfx("gavel");
+    this.notify();
 
+    this.runPostRevealSequence();
+  }
+
+  private runPostRevealSequence() {
     if (this.settings.snitchEnabled && this.currentSnitchId && this.players.has(this.currentSnitchId)) {
-      this.snitchVoteOpen = true;
-      this.snitchVoteDeadline = Date.now() + SNITCH_VOTE_MS;
-      this.notify();
-      this.setTimer(() => this.resolveSnitchVote(), SNITCH_VOTE_MS);
+      this.openSnitchVote();
+    } else if (this.settings.alibiModeEnabled && this.aliasDrawerId && this.players.has(this.aliasDrawerId)) {
+      this.openAlibiVote();
     } else {
-      this.notify();
       this.setTimer(() => this.advanceTurnPointer(), ROUND_REVEAL_MS);
     }
   }
 
+  private openSnitchVote() {
+    this.snitchVoteOpen = true;
+    this.snitchVoteDeadline = Date.now() + SNITCH_VOTE_MS;
+    this.notify();
+    this.setTimer(() => this.resolveSnitchVote(), SNITCH_VOTE_MS);
+  }
+
   private resolveSnitchVote() {
-    if (!this.lastRoundReveal || !this.currentSnitchId) return;
+    if (!this.lastRoundReveal || !this.currentSnitchId) {
+      this.setTimer(() => this.advanceTurnPointer(), 0);
+      return;
+    }
     this.snitchVoteOpen = false;
 
     const tally: Map<string, number> = new Map();
@@ -588,7 +781,72 @@ export class Room {
     this.cb.onSfx("snitch");
     this.notify();
 
-    this.setTimer(() => this.advanceTurnPointer(), SNITCH_REVEAL_PAUSE_MS);
+    this.setTimer(() => {
+      if (this.settings.alibiModeEnabled && this.aliasDrawerId && this.players.has(this.aliasDrawerId)) {
+        this.openAlibiVote();
+      } else {
+        this.advanceTurnPointer();
+      }
+    }, SNITCH_REVEAL_PAUSE_MS);
+  }
+
+  private openAlibiVote() {
+    this.alibiVoteOpen = true;
+    this.alibiVoteDeadline = Date.now() + ALIBI_VOTE_MS;
+    this.notify();
+    this.setTimer(() => this.resolveAlibiVote(), ALIBI_VOTE_MS);
+  }
+
+  private resolveAlibiVote() {
+    if (!this.lastRoundReveal || !this.aliasDrawerId) {
+      this.setTimer(() => this.advanceTurnPointer(), 0);
+      return;
+    }
+    this.alibiVoteOpen = false;
+
+    const tally: Map<string, number> = new Map();
+    for (const target of this.alibiVotes.values()) {
+      tally.set(target, (tally.get(target) ?? 0) + 1);
+    }
+
+    let topTarget: string | null = null;
+    let topVotes = 0;
+    for (const [target, votes] of tally) {
+      if (votes > topVotes) {
+        topVotes = votes;
+        topTarget = target;
+      }
+    }
+
+    const caught = topTarget === this.aliasDrawerId && topVotes > 0;
+    const extraDeltas: ScoreDelta[] = [];
+
+    if (caught) {
+      for (const [voterId, target] of this.alibiVotes) {
+        if (target !== this.aliasDrawerId) continue;
+        const voter = this.players.get(voterId);
+        if (!voter) continue;
+        voter.score += ALIBI_ACCUSER_POINTS;
+        extraDeltas.push({ playerId: voter.id, nickname: voter.nickname, points: ALIBI_ACCUSER_POINTS, reason: "alibi-accuser" });
+      }
+    } else {
+      const fake = this.players.get(this.aliasDrawerId);
+      if (fake) {
+        fake.score += ALIBI_SURVIVOR_POINTS;
+        extraDeltas.push({ playerId: fake.id, nickname: fake.nickname, points: ALIBI_SURVIVOR_POINTS, reason: "alibi-survivor" });
+      }
+    }
+
+    const fakePlayer = this.players.get(this.aliasDrawerId);
+    this.lastRoundReveal = {
+      ...this.lastRoundReveal,
+      deltas: [...this.lastRoundReveal.deltas, ...extraDeltas],
+      alibiReveal: fakePlayer ? { fakeId: fakePlayer.id, nickname: fakePlayer.nickname, caught } : null,
+    };
+    this.cb.onSfx("snitch");
+    this.notify();
+
+    this.setTimer(() => this.advanceTurnPointer(), ALIBI_REVEAL_PAUSE_MS);
   }
 
   private advanceTurnPointer() {
@@ -599,11 +857,119 @@ export class Room {
     }
 
     if (this.round > this.settings.totalRounds || this.turnOrder.length === 0) {
-      this.endGame();
+      if (this.settings.trialEnabled && this.turnOrder.length > 0 && this.evidenceTape.length > 0) {
+        this.beginTrial();
+      } else {
+        this.endGame();
+      }
       return;
     }
 
     this.beginTurn();
+  }
+
+  // ---------- The Trial ----------
+
+  private beginTrial() {
+    this.clearAllTimers();
+    this.phase = "TRIAL";
+    this.resetTrialState();
+    this.trialStage = "VOTING";
+    this.trialDeadline = Date.now() + TRIAL_VOTE_MS;
+    this.cb.onSfx("gavel");
+    this.notify();
+    this.setTimer(() => this.resolveTrialVoting(), TRIAL_VOTE_MS);
+  }
+
+  castTrialVote(voterId: string, targetPlayerId: string) {
+    if (this.phase !== "TRIAL" || this.trialStage !== "VOTING") return;
+    if (!this.players.has(voterId) || !this.players.has(targetPlayerId)) return;
+    this.trialVotes.set(voterId, targetPlayerId);
+  }
+
+  private resolveTrialVoting() {
+    const tally: Map<string, number> = new Map();
+    for (const target of this.trialVotes.values()) tally.set(target, (tally.get(target) ?? 0) + 1);
+
+    let ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+
+    if (ranked.length === 0) {
+      const seen = new Set<string>();
+      for (const rec of this.evidenceTape) {
+        if (!seen.has(rec.drawerId) && this.players.has(rec.drawerId)) {
+          seen.add(rec.drawerId);
+          ranked.push(rec.drawerId);
+        }
+      }
+    }
+
+    this.trialDefendants = ranked.filter((id) => this.players.has(id)).slice(0, 3);
+    if (this.trialDefendants.length === 0) {
+      this.endGame();
+      return;
+    }
+
+    this.trialStage = "DEFENSE";
+    this.trialDefenseIndex = 0;
+    this.startDefenseTimer();
+    this.notify();
+  }
+
+  private startDefenseTimer() {
+    this.trialDeadline = Date.now() + TRIAL_DEFENSE_MS;
+    this.setTimer(() => this.advanceDefense(), TRIAL_DEFENSE_MS);
+  }
+
+  submitTrialDefense(playerId: string, text: string) {
+    if (this.phase !== "TRIAL" || this.trialStage !== "DEFENSE") return;
+    const current = this.trialDefendants[this.trialDefenseIndex];
+    if (!current || playerId !== current) return;
+    this.trialDefenses[playerId] = text.slice(0, 280);
+    this.notify();
+    this.clearAllTimers();
+    this.advanceDefense();
+  }
+
+  private advanceDefense() {
+    this.trialDefenseIndex += 1;
+    if (this.trialDefenseIndex >= this.trialDefendants.length) {
+      void this.runVerdicts();
+    } else {
+      this.startDefenseTimer();
+      this.notify();
+    }
+  }
+
+  private async runVerdicts() {
+    this.trialStage = "VERDICT";
+    this.trialDeadline = null;
+    this.notify();
+
+    const inputs = this.trialDefendants.map((id) => {
+      const p = this.players.get(id);
+      const rec = [...this.evidenceTape].reverse().find((r) => r.drawerId === id);
+      return {
+        playerId: id,
+        nickname: p?.nickname ?? "Unknown",
+        word: rec?.word ?? "something indescribable",
+        defenseText: this.trialDefenses[id] ?? "",
+      };
+    });
+
+    const verdicts = await generateVerdicts(inputs);
+    if (this.phase !== "TRIAL") return; // room moved on while we awaited the API call
+
+    this.trialVerdicts = verdicts;
+    this.cb.onSfx("gavel");
+    this.notify();
+
+    this.setTimer(() => this.endGame(), TRIAL_AUTO_CONTINUE_MS);
+  }
+
+  continueTrial() {
+    if (this.phase !== "TRIAL" || this.trialStage !== "VERDICT") return;
+    this.clearAllTimers();
+    this.endGame();
   }
 
   private endGame() {
@@ -618,6 +984,7 @@ export class Room {
         nickname: p.nickname,
         avatar: p.avatar,
         score: p.score,
+        dirtyInk: p.dirtyInk,
         isHost: p.isHost,
         connected: p.connected,
         guessedThisTurn: p.guessedThisTurn,
@@ -633,33 +1000,42 @@ export class Room {
     this.phase = "LOBBY";
     this.finalScoreboard = null;
     this.lastRoundReveal = null;
-    for (const p of this.players.values()) p.score = 0;
+    this.resetTrialState();
+    for (const p of this.players.values()) {
+      p.score = 0;
+      p.dirtyInk = 0;
+    }
     this.notify();
   }
 
   // ---------- drawing ----------
 
-  isCurrentDrawer(playerId: string): boolean {
-    return this.phase === "DRAWING" && playerId === this.getActiveDrawerId();
+  canDrawOnCanvas(playerId: string, canvas: CanvasId): boolean {
+    if (this.phase !== "DRAWING") return false;
+    if (canvas === "A") return playerId === this.getActiveDrawerId();
+    return this.aliasDrawerId != null && playerId === this.aliasDrawerId;
   }
 
-  recordDrawAction(action: DrawingAction) {
-    const idx = this.drawingHistory.findIndex((a) => a.id === action.id);
-    if (idx >= 0) this.drawingHistory[idx] = action;
-    else this.drawingHistory.push(action);
+  recordDrawAction(action: DrawingAction, canvas: CanvasId) {
+    const history = canvas === "A" ? this.drawingHistory : this.drawingHistoryB;
+    const idx = history.findIndex((a) => a.id === action.id);
+    if (idx >= 0) history[idx] = action;
+    else history.push(action);
   }
 
-  undoLastStroke() {
-    for (let i = this.drawingHistory.length - 1; i >= 0; i--) {
-      if (this.drawingHistory[i].id) {
-        this.drawingHistory.splice(i, 1);
+  undoLastStroke(canvas: CanvasId) {
+    const history = canvas === "A" ? this.drawingHistory : this.drawingHistoryB;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].id) {
+        history.splice(i, 1);
         break;
       }
     }
   }
 
-  clearDrawing() {
-    this.drawingHistory = [];
+  clearDrawing(canvas: CanvasId) {
+    if (canvas === "A") this.drawingHistory = [];
+    else this.drawingHistoryB = [];
   }
 
   getPlayerBySocket(socketId: string): PlayerInternal | undefined {

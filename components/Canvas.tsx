@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import { useGame } from "./GameProvider";
-import { DrawingAction, FillAction, INK_METER_BUDGET, Point, SentenceId, Stroke } from "@/lib/types";
+import { CanvasId, DrawingAction, FillAction, INK_METER_BUDGET, Point, SentenceId, Stroke } from "@/lib/types";
 import {
   CANVAS_W,
   CANVAS_H,
@@ -23,12 +23,16 @@ export function Canvas({
   sentence,
   turnStartedAt,
   turnKey,
+  canvasId = "A",
+  label,
 }: {
   isDrawer: boolean;
   applyHandicap: boolean;
   sentence: SentenceId | null;
   turnStartedAt: number | null;
   turnKey: string;
+  canvasId?: CanvasId;
+  label?: string;
 }) {
   const { socket, sendDrawAction, undo, clear } = useGame();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -142,10 +146,12 @@ export function Canvas({
       composite();
     }
 
-    function onAction(action: DrawingAction) {
+    function onAction(action: DrawingAction, canvas: CanvasId) {
+      if (canvas !== canvasId) return;
       upsertRemote(action);
     }
-    function onUndo() {
+    function onUndo(canvas: CanvasId) {
+      if (canvas !== canvasId) return;
       if (pendingRef.current) {
         pendingRef.current = null;
       } else {
@@ -153,13 +159,14 @@ export function Canvas({
       }
       rebuildCommittedFromScratch();
     }
-    function onClear() {
+    function onClear(canvas: CanvasId) {
+      if (canvas !== canvasId) return;
       historyRef.current = [];
       pendingRef.current = null;
       rebuildCommittedFromScratch();
     }
-    function onSync({ actions }: { actions: DrawingAction[] }) {
-      historyRef.current = actions;
+    function onSync(payload: { a: DrawingAction[]; b: DrawingAction[] }) {
+      historyRef.current = canvasId === "A" ? payload.a : payload.b;
       pendingRef.current = null;
       rebuildCommittedFromScratch();
     }
@@ -174,7 +181,7 @@ export function Canvas({
       socket.off("draw:clear", onClear);
       socket.off("draw:canvasSync", onSync);
     };
-  }, [socket, bakePending, composite, rebuildCommittedFromScratch]);
+  }, [socket, bakePending, composite, rebuildCommittedFromScratch, canvasId]);
 
   function toLocalPoint(e: React.PointerEvent): Point {
     const canvas = canvasRef.current!;
@@ -206,7 +213,7 @@ export function Canvas({
         applyFill(ctx, action);
       }
       composite();
-      sendDrawAction(action);
+      sendDrawAction(action, canvasId);
       return;
     }
 
@@ -245,7 +252,7 @@ export function Canvas({
     if (now - lastSentRef.current >= 45) {
       lastSentRef.current = now;
       setInkUsed(inkUsedRef.current);
-      sendDrawAction({ ...pendingRef.current, points: [...pendingRef.current.points] });
+      sendDrawAction({ ...pendingRef.current, points: [...pendingRef.current.points] }, canvasId);
     }
   }
 
@@ -254,7 +261,7 @@ export function Canvas({
     isPointerDownRef.current = false;
     if (handicap === "one-line") oneLineUsedRef.current = true;
     if (pendingRef.current) {
-      sendDrawAction({ ...pendingRef.current, points: [...pendingRef.current.points] });
+      sendDrawAction({ ...pendingRef.current, points: [...pendingRef.current.points] }, canvasId);
       bakePending();
       composite();
     }
@@ -267,14 +274,14 @@ export function Canvas({
       historyRef.current.pop();
     }
     rebuildCommittedFromScratch();
-    undo();
+    undo(canvasId);
   }
 
   function handleClear() {
     historyRef.current = [];
     pendingRef.current = null;
     rebuildCommittedFromScratch();
-    clear();
+    clear(canvasId);
   }
 
   return (
@@ -290,6 +297,11 @@ export function Canvas({
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
           />
+          {label && (
+            <div className="pointer-events-none absolute left-2 top-2 rounded-sm bg-charcoal-950/70 px-2 py-1 font-typewriter text-[10px] uppercase tracking-wider text-tape">
+              {label}
+            </div>
+          )}
           {!isDrawer && (
             <div className="pointer-events-none absolute right-2 top-2 rounded-sm bg-charcoal-950/70 px-2 py-1 font-typewriter text-[10px] uppercase tracking-wider text-tape">
               Evidence Sheet — Do Not Touch

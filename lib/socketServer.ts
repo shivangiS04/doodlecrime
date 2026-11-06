@@ -65,6 +65,11 @@ function makeRoomCallbacks(io: IOServer, code: string): RoomCallbacks {
       const socketId = findSocketId(room, playerId);
       if (socketId) io.to(socketId).emit("snitch:assigned", { sabotageWindowMs });
     },
+    onAlibiAssigned: (playerId: string, category: string) => {
+      const room = roomStore.get(code);
+      const socketId = findSocketId(room, playerId);
+      if (socketId) io.to(socketId).emit("alibi:assigned", { category });
+    },
   };
 }
 
@@ -119,7 +124,7 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
         socket.join(room.code);
         sessions.set(socket.id, { roomCode: room.code, playerId: rejoinPlayerId });
         if (room.phase === "DRAWING") {
-          socket.emit("draw:canvasSync", { actions: room.drawingHistory });
+          socket.emit("draw:canvasSync", { a: room.drawingHistory, b: room.drawingHistoryB });
         }
         return ack({ ok: true, playerId: rejoinPlayerId });
       }
@@ -165,26 +170,26 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
       room.chooseWord(player.id, word);
     });
 
-    socket.on("draw:action", (action) => {
+    socket.on("draw:action", (action, canvas) => {
       const { room, player } = getRoomAndPlayer(socket.id);
-      if (!room || !player || !room.isCurrentDrawer(player.id)) return;
+      if (!room || !player || !room.canDrawOnCanvas(player.id, canvas)) return;
       if (!drawLimiter.tryConsume(socket.id)) return;
-      room.recordDrawAction(action);
-      socket.to(room.code).emit("draw:action", action);
+      room.recordDrawAction(action, canvas);
+      socket.to(room.code).emit("draw:action", action, canvas);
     });
 
-    socket.on("draw:undo", () => {
+    socket.on("draw:undo", (canvas) => {
       const { room, player } = getRoomAndPlayer(socket.id);
-      if (!room || !player || !room.isCurrentDrawer(player.id)) return;
-      room.undoLastStroke();
-      socket.to(room.code).emit("draw:undo");
+      if (!room || !player || !room.canDrawOnCanvas(player.id, canvas)) return;
+      room.undoLastStroke(canvas);
+      socket.to(room.code).emit("draw:undo", canvas);
     });
 
-    socket.on("draw:clear", () => {
+    socket.on("draw:clear", (canvas) => {
       const { room, player } = getRoomAndPlayer(socket.id);
-      if (!room || !player || !room.isCurrentDrawer(player.id)) return;
-      room.clearDrawing();
-      socket.to(room.code).emit("draw:clear");
+      if (!room || !player || !room.canDrawOnCanvas(player.id, canvas)) return;
+      room.clearDrawing(canvas);
+      socket.to(room.code).emit("draw:clear", canvas);
     });
 
     socket.on("chat:send", ({ text, decoy }) => {
@@ -208,6 +213,48 @@ export function initSocketServer(httpServer: HTTPServer): IOServer {
       const { room, player } = getRoomAndPlayer(socket.id);
       if (!room || !player) return;
       room.castSnitchVote(player.id, targetPlayerId);
+    });
+
+    socket.on("alibi:vote", ({ targetPlayerId }) => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.castAlibiVote(player.id, targetPlayerId);
+    });
+
+    socket.on("bribe:buyLetterHint", () => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.buyLetterHint(player.id);
+    });
+
+    socket.on("bribe:curseLeader", () => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.curseLeader(player.id);
+    });
+
+    socket.on("bribe:bribeJudge", () => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.bribeJudge(player.id);
+    });
+
+    socket.on("trial:vote", ({ targetPlayerId }) => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.castTrialVote(player.id, targetPlayerId);
+    });
+
+    socket.on("trial:defense", ({ text }) => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player) return;
+      room.submitTrialDefense(player.id, (text || "").slice(0, 280));
+    });
+
+    socket.on("trial:continue", () => {
+      const { room, player } = getRoomAndPlayer(socket.id);
+      if (!room || !player?.isHost) return;
+      room.continueTrial();
     });
 
     socket.on("evidence:list", (ack) => {

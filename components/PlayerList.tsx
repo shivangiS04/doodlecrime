@@ -6,10 +6,12 @@ export function PlayerList({
   players,
   currentDrawerId,
   myPlayerId,
+  showDirtyInk,
 }: {
   players: PlayerPublic[];
   currentDrawerId: string | null;
   myPlayerId: string | null;
+  showDirtyInk?: boolean;
 }) {
   const sorted = [...players].sort((a, b) => b.score - a.score);
 
@@ -38,6 +40,11 @@ export function PlayerList({
             {p.id === currentDrawerId && <span title="Drawing">✏️</span>}
             {p.guessedThisTurn && p.id !== currentDrawerId && <span title="Guessed">✅</span>}
             {p.isHost && <span title="Host">👑</span>}
+            {showDirtyInk && (
+              <span className="font-typewriter tabular-nums text-xs text-paper/50" title="Dirty Ink">
+                🖋️{p.dirtyInk}
+              </span>
+            )}
             <span className="font-typewriter tabular-nums text-tape">{p.score}</span>
           </li>
         ))}

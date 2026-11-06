@@ -12,6 +12,7 @@ import {
 import { getSocket, GameSocket, saveIdentity, StoredIdentity } from "@/lib/socketClient";
 import {
   Avatar,
+  CanvasId,
   ChatEntry,
   DrawingAction,
   RoomSettings,
@@ -36,6 +37,8 @@ interface GameContextValue {
   myWord: string | null;
   snitchAssignment: { sabotageWindowMs: number } | null;
   isSnitchThisTurn: boolean;
+  alibiCategory: string | null;
+  isAlibiFakeThisTurn: boolean;
 
   createRoom: (nickname: string, avatar: Avatar) => Promise<{ ok: true; code: string } | { ok: false; error: string }>;
   joinRoom: (
@@ -49,12 +52,19 @@ interface GameContextValue {
   startGame: () => void;
   chooseWord: (word: string) => void;
   sendChat: (text: string, decoy?: boolean) => void;
-  sendDrawAction: (action: DrawingAction) => void;
-  undo: () => void;
-  clear: () => void;
+  sendDrawAction: (action: DrawingAction, canvas: CanvasId) => void;
+  undo: (canvas: CanvasId) => void;
+  clear: (canvas: CanvasId) => void;
   playAgain: () => void;
   activateSabotage: () => void;
   castSnitchVote: (targetPlayerId: string) => void;
+  castAlibiVote: (targetPlayerId: string) => void;
+  buyLetterHint: () => void;
+  curseLeader: () => void;
+  bribeJudge: () => void;
+  castTrialVote: (targetPlayerId: string) => void;
+  submitTrialDefense: (text: string) => void;
+  continueTrial: () => void;
   fetchEvidenceTape: () => Promise<TurnRecording[]>;
 }
 
@@ -78,6 +88,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const [myWord, setMyWord] = useState<string | null>(null);
   const [snitchAssignment, setSnitchAssignment] = useState<{ sabotageWindowMs: number } | null>(null);
   const [isSnitchThisTurn, setIsSnitchThisTurn] = useState(false);
+  const [alibiCategory, setAlibiCategory] = useState<string | null>(null);
+  const [isAlibiFakeThisTurn, setIsAlibiFakeThisTurn] = useState(false);
 
   useEffect(() => {
     const socket = socketRef.current;
@@ -91,6 +103,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         setMyWord(null);
         setSnitchAssignment(null);
         setIsSnitchThisTurn(false);
+        setAlibiCategory(null);
+        setIsAlibiFakeThisTurn(false);
         if (state.currentDrawerId !== myPlayerId) setWordChoices(null);
       }
     };
@@ -114,6 +128,10 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       setSnitchAssignment(payload);
       setIsSnitchThisTurn(true);
     };
+    const onAlibiAssigned = (payload: { category: string }) => {
+      setAlibiCategory(payload.category);
+      setIsAlibiFakeThisTurn(true);
+    };
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
@@ -125,6 +143,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     socket.on("round:reveal", onRoundReveal);
     socket.on("sfx", onSfx);
     socket.on("snitch:assigned", onSnitchAssigned);
+    socket.on("alibi:assigned", onAlibiAssigned);
 
     setConnected(socket.connected);
 
@@ -139,6 +158,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       socket.off("round:reveal", onRoundReveal);
       socket.off("sfx", onSfx);
       socket.off("snitch:assigned", onSnitchAssigned);
+      socket.off("alibi:assigned", onAlibiAssigned);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myPlayerId]);
@@ -204,16 +224,16 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     socketRef.current?.emit("chat:send", { text, decoy });
   }, []);
 
-  const sendDrawAction = useCallback((action: DrawingAction) => {
-    socketRef.current?.emit("draw:action", action);
+  const sendDrawAction = useCallback((action: DrawingAction, canvas: CanvasId) => {
+    socketRef.current?.emit("draw:action", action, canvas);
   }, []);
 
-  const undo = useCallback(() => {
-    socketRef.current?.emit("draw:undo");
+  const undo = useCallback((canvas: CanvasId) => {
+    socketRef.current?.emit("draw:undo", canvas);
   }, []);
 
-  const clear = useCallback(() => {
-    socketRef.current?.emit("draw:clear");
+  const clear = useCallback((canvas: CanvasId) => {
+    socketRef.current?.emit("draw:clear", canvas);
   }, []);
 
   const playAgain = useCallback(() => {
@@ -226,6 +246,34 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   const castSnitchVote = useCallback((targetPlayerId: string) => {
     socketRef.current?.emit("snitch:vote", { targetPlayerId });
+  }, []);
+
+  const castAlibiVote = useCallback((targetPlayerId: string) => {
+    socketRef.current?.emit("alibi:vote", { targetPlayerId });
+  }, []);
+
+  const buyLetterHint = useCallback(() => {
+    socketRef.current?.emit("bribe:buyLetterHint");
+  }, []);
+
+  const curseLeader = useCallback(() => {
+    socketRef.current?.emit("bribe:curseLeader");
+  }, []);
+
+  const bribeJudge = useCallback(() => {
+    socketRef.current?.emit("bribe:bribeJudge");
+  }, []);
+
+  const castTrialVote = useCallback((targetPlayerId: string) => {
+    socketRef.current?.emit("trial:vote", { targetPlayerId });
+  }, []);
+
+  const submitTrialDefense = useCallback((text: string) => {
+    socketRef.current?.emit("trial:defense", { text });
+  }, []);
+
+  const continueTrial = useCallback(() => {
+    socketRef.current?.emit("trial:continue");
   }, []);
 
   const fetchEvidenceTape = useCallback(
@@ -249,6 +297,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       myWord,
       snitchAssignment,
       isSnitchThisTurn,
+      alibiCategory,
+      isAlibiFakeThisTurn,
       createRoom,
       joinRoom,
       leaveRoom,
@@ -262,6 +312,13 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       playAgain,
       activateSabotage,
       castSnitchVote,
+      castAlibiVote,
+      buyLetterHint,
+      curseLeader,
+      bribeJudge,
+      castTrialVote,
+      submitTrialDefense,
+      continueTrial,
       fetchEvidenceTape,
     }),
     [
@@ -275,6 +332,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       myWord,
       snitchAssignment,
       isSnitchThisTurn,
+      alibiCategory,
+      isAlibiFakeThisTurn,
       createRoom,
       joinRoom,
       leaveRoom,
@@ -288,6 +347,13 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       playAgain,
       activateSabotage,
       castSnitchVote,
+      castAlibiVote,
+      buyLetterHint,
+      curseLeader,
+      bribeJudge,
+      castTrialVote,
+      submitTrialDefense,
+      continueTrial,
       fetchEvidenceTape,
     ]
   );

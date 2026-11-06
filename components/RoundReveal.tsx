@@ -5,14 +5,17 @@ import { RoomStatePublic } from "@/lib/types";
 import { useGame } from "./GameProvider";
 import { EvidenceReplay } from "./EvidenceReplay";
 import { SnitchVotePanel } from "./SnitchVotePanel";
+import { AlibiVotePanel } from "./AlibiVotePanel";
 
 export function RoundReveal({
   roomState,
   isSnitchThisTurn,
+  isAlibiFakeThisTurn,
   myPlayerId,
 }: {
   roomState: RoomStatePublic;
   isSnitchThisTurn: boolean;
+  isAlibiFakeThisTurn: boolean;
   myPlayerId: string | null;
 }) {
   const reveal = roomState.lastRoundReveal;
@@ -55,6 +58,9 @@ export function RoundReveal({
                 {d.reason === "drawer" && <span className="text-charcoal-600"> (drawing)</span>}
                 {d.reason === "snitch-accuser" && <span className="text-charcoal-600"> (caught the Snitch)</span>}
                 {d.reason === "snitch-survivor" && <span className="text-charcoal-600"> (undetected Snitch)</span>}
+                {d.reason === "alibi-accuser" && <span className="text-charcoal-600"> (caught the fake)</span>}
+                {d.reason === "alibi-survivor" && <span className="text-charcoal-600"> (convincing alibi)</span>}
+                {d.reason === "bribe-payoff" && <span className="text-charcoal-600"> (bribe paid off)</span>}
               </span>
               <span className="font-semibold text-blood">+{d.points}</span>
             </li>
@@ -69,6 +75,17 @@ export function RoundReveal({
           <p className="mt-3 text-center font-typewriter text-sm text-blood">
             The Snitch was {reveal.snitchReveal.nickname} —{" "}
             {reveal.snitchReveal.caught ? "caught red-handed!" : "got away with it."}
+          </p>
+        )}
+
+        {roomState.alibiVote?.active && myPlayerId && (
+          <AlibiVotePanel roomState={roomState} isAlibiFakeThisTurn={isAlibiFakeThisTurn} myPlayerId={myPlayerId} />
+        )}
+
+        {reveal.alibiReveal && (
+          <p className="mt-3 text-center font-typewriter text-sm text-blood">
+            The fake alibi was {reveal.alibiReveal.nickname} —{" "}
+            {reveal.alibiReveal.caught ? "caught red-handed!" : "sold it completely."}
           </p>
         )}
       </div>

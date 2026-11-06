@@ -17,6 +17,9 @@ import { GameOverScreen } from "@/components/GameOverScreen";
 import { SfxPlayer } from "@/components/SfxPlayer";
 import { SentenceBanner } from "@/components/SentenceBanner";
 import { SnitchSabotageButton } from "@/components/SnitchSabotageButton";
+import { AlibiBanner } from "@/components/AlibiBanner";
+import { BribeShop } from "@/components/BribeShop";
+import { CourtroomScene } from "@/components/CourtroomScene";
 
 export default function RoomPage() {
   const params = useParams<{ code: string }>();
@@ -33,6 +36,8 @@ export default function RoomPage() {
     chatLog,
     connected,
     isSnitchThisTurn,
+    isAlibiFakeThisTurn,
+    alibiCategory,
   } = useGame();
 
   const [joinAttempted, setJoinAttempted] = useState(false);
@@ -113,7 +118,11 @@ export default function RoomPage() {
 
   const isRealDrawer = roomState.currentDrawerId === myPlayerId;
   const canDraw = roomState.activeDrawerId === myPlayerId;
+  const canDrawFakeCanvas = roomState.aliasDrawerId === myPlayerId;
   const isHost = roomState.players.find((p) => p.id === myPlayerId)?.isHost ?? false;
+  const isAlibiTurn = roomState.aliasDrawerId != null;
+  const turnKey = `${roomState.round}-${roomState.turnIndex}`;
+  const isGuesser = !isRealDrawer && !canDrawFakeCanvas;
 
   return (
     <main className="min-h-screen px-3 py-4">
@@ -127,25 +136,62 @@ export default function RoomPage() {
 
       {roomState.phase === "LOBBY" && <Lobby roomState={roomState} isHost={isHost} />}
 
-      {roomState.phase !== "LOBBY" && (
+      {roomState.phase !== "LOBBY" && roomState.phase !== "TRIAL" && (
         <div className="mx-auto flex max-w-6xl flex-col gap-3">
           <TopBar roomState={roomState} isDrawer={isRealDrawer} myWord={myWord} />
           {roomState.phase === "DRAWING" && roomState.currentSentence && (
-            <SentenceBanner sentence={roomState.currentSentence} turnKey={`${roomState.round}-${roomState.turnIndex}`} />
+            <SentenceBanner sentence={roomState.currentSentence} turnKey={turnKey} />
+          )}
+          {roomState.phase === "DRAWING" && isAlibiTurn && (
+            <AlibiBanner turnKey={turnKey} category={alibiCategory} />
           )}
           <div className="grid gap-3 lg:grid-cols-[220px_1fr_280px]">
             <div className="order-2 lg:order-1 space-y-3">
-              <PlayerList players={roomState.players} currentDrawerId={roomState.currentDrawerId} myPlayerId={myPlayerId} />
+              <PlayerList
+                players={roomState.players}
+                currentDrawerId={roomState.currentDrawerId}
+                myPlayerId={myPlayerId}
+                showDirtyInk={roomState.settings.bribeEconomyEnabled}
+              />
               {roomState.phase === "DRAWING" && isSnitchThisTurn && <SnitchSabotageButton />}
+              {roomState.settings.bribeEconomyEnabled && roomState.phase !== "PICK_WORD" && myPlayerId && (
+                <BribeShop
+                  myDirtyInk={roomState.players.find((p) => p.id === myPlayerId)?.dirtyInk ?? 0}
+                  canBuyHint={isGuesser && roomState.phase === "DRAWING"}
+                />
+              )}
             </div>
             <div className="order-1 lg:order-2">
-              <Canvas
-                isDrawer={canDraw}
-                applyHandicap={isRealDrawer}
-                sentence={roomState.currentSentence}
-                turnStartedAt={roomState.turnStartedAt}
-                turnKey={`${roomState.round}-${roomState.turnIndex}`}
-              />
+              {isAlibiTurn ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Canvas
+                    isDrawer={canDraw}
+                    applyHandicap={isRealDrawer}
+                    sentence={roomState.currentSentence}
+                    turnStartedAt={roomState.turnStartedAt}
+                    turnKey={turnKey}
+                    canvasId="A"
+                    label={roomState.players.find((p) => p.id === roomState.currentDrawerId)?.nickname ?? "Drawer A"}
+                  />
+                  <Canvas
+                    isDrawer={canDrawFakeCanvas}
+                    applyHandicap={false}
+                    sentence={null}
+                    turnStartedAt={roomState.turnStartedAt}
+                    turnKey={turnKey}
+                    canvasId="B"
+                    label={roomState.players.find((p) => p.id === roomState.aliasDrawerId)?.nickname ?? "Drawer B"}
+                  />
+                </div>
+              ) : (
+                <Canvas
+                  isDrawer={canDraw}
+                  applyHandicap={isRealDrawer}
+                  sentence={roomState.currentSentence}
+                  turnStartedAt={roomState.turnStartedAt}
+                  turnKey={turnKey}
+                />
+              )}
             </div>
             <div className="order-3 h-[320px] lg:h-auto">
               <ChatPanel
@@ -164,7 +210,16 @@ export default function RoomPage() {
       )}
 
       {roomState.phase === "ROUND_REVEAL" && (
-        <RoundReveal roomState={roomState} isSnitchThisTurn={isSnitchThisTurn} myPlayerId={myPlayerId} />
+        <RoundReveal
+          roomState={roomState}
+          isSnitchThisTurn={isSnitchThisTurn}
+          isAlibiFakeThisTurn={isAlibiFakeThisTurn}
+          myPlayerId={myPlayerId}
+        />
+      )}
+
+      {roomState.phase === "TRIAL" && (
+        <CourtroomScene roomState={roomState} myPlayerId={myPlayerId} isHost={isHost} />
       )}
 
       {roomState.phase === "GAME_OVER" && roomState.finalScoreboard && (

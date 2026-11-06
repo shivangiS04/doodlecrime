@@ -28,6 +28,7 @@ export interface FillAction {
 }
 
 export type DrawingAction = Stroke | FillAction;
+export type CanvasId = "A" | "B";
 
 export interface Avatar {
   emoji: string;
@@ -39,6 +40,7 @@ export interface PlayerPublic {
   nickname: string;
   avatar: Avatar;
   score: number;
+  dirtyInk: number;
   isHost: boolean;
   connected: boolean;
   guessedThisTurn: boolean;
@@ -54,6 +56,9 @@ export interface RoomSettings {
   maxPlayers: number;
   sentencesEnabled: boolean;
   snitchEnabled: boolean;
+  bribeEconomyEnabled: boolean;
+  alibiModeEnabled: boolean;
+  trialEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: RoomSettings = {
@@ -65,6 +70,9 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   maxPlayers: 12,
   sentencesEnabled: false,
   snitchEnabled: false,
+  bribeEconomyEnabled: false,
+  alibiModeEnabled: false,
+  trialEnabled: false,
 };
 
 export interface ChatEntry {
@@ -76,7 +84,16 @@ export interface ChatEntry {
   guess?: "correct" | "close" | "wrong";
 }
 
-export type ScoreReason = "guess" | "drawer" | "speed-bonus" | "snitch-accuser" | "snitch-survivor";
+export type ScoreReason =
+  | "guess"
+  | "drawer"
+  | "speed-bonus"
+  | "snitch-accuser"
+  | "snitch-survivor"
+  | "alibi-accuser"
+  | "alibi-survivor"
+  | "bribe-payoff"
+  | "bribe-caught";
 
 export interface ScoreDelta {
   playerId: string;
@@ -115,6 +132,16 @@ export const SENTENCE_IDS: SentenceId[] = [
 
 export const INK_METER_BUDGET = 5200; // total stroke-length units allowed
 
+// ---------- Bribe Economy ----------
+
+export const BRIBE_COSTS = {
+  letterHint: 40,
+  curseLeader: 60,
+  bribeJudge: 50,
+} as const;
+
+export const DIRTY_INK_PER_GUESS = 15;
+
 // ---------- Evidence Tape ----------
 
 export interface TurnRecording {
@@ -127,9 +154,26 @@ export interface TurnRecording {
   actions: DrawingAction[];
 }
 
+// ---------- The Trial ----------
+
+export type TrialStage = "VOTING" | "DEFENSE" | "VERDICT" | null;
+
+export interface TrialVerdict {
+  playerId: string;
+  nickname: string;
+  verdict: string;
+  sentence: string;
+}
+
 // ---------- Room public state ----------
 
 export interface SnitchVoteState {
+  active: boolean;
+  deadline: number;
+  eligibleVoterIds: string[];
+}
+
+export interface AlibiVoteState {
   active: boolean;
   deadline: number;
   eligibleVoterIds: string[];
@@ -145,19 +189,30 @@ export interface RoomStatePublic {
   turnIndex: number;
   currentDrawerId: string | null;
   activeDrawerId: string | null; // normally === currentDrawerId; swaps to the Snitch during a sabotage window
+  aliasDrawerId: string | null; // Alibi Mode's second ("fake") drawer for this turn, if any
   turnStartedAt: number | null;
   wordLength: number | null;
   revealedMask: string | null; // e.g. "_ _ t _ e"
   turnEndsAt: number | null; // epoch ms
   currentSentence: SentenceId | null;
   snitchVote: SnitchVoteState | null;
+  alibiVote: AlibiVoteState | null;
   lastRoundReveal: {
     word: string;
     deltas: ScoreDelta[];
     recording: TurnRecording | null;
     snitchReveal: { snitchId: string; nickname: string; caught: boolean } | null;
+    alibiReveal: { fakeId: string; nickname: string; caught: boolean } | null;
   } | null;
   finalScoreboard: PlayerPublic[] | null;
+
+  // The Trial (end-of-game only)
+  trialStage: TrialStage;
+  trialDeadline: number | null;
+  trialDefendants: string[];
+  trialCurrentDefendantId: string | null;
+  trialDefenses: Record<string, string>;
+  trialVerdicts: TrialVerdict[] | null;
 }
 
 // ---------- Client -> Server events ----------
@@ -181,14 +236,23 @@ export interface ClientToServerEvents {
 
   "word:choose": (payload: { word: string }) => void;
 
-  "draw:action": (payload: DrawingAction) => void;
-  "draw:undo": () => void;
-  "draw:clear": () => void;
+  "draw:action": (payload: DrawingAction, canvas: CanvasId) => void;
+  "draw:undo": (canvas: CanvasId) => void;
+  "draw:clear": (canvas: CanvasId) => void;
 
   "chat:send": (payload: { text: string; decoy?: boolean }) => void;
 
   "snitch:sabotage": () => void;
   "snitch:vote": (payload: { targetPlayerId: string }) => void;
+  "alibi:vote": (payload: { targetPlayerId: string }) => void;
+
+  "bribe:buyLetterHint": () => void;
+  "bribe:curseLeader": () => void;
+  "bribe:bribeJudge": () => void;
+
+  "trial:vote": (payload: { targetPlayerId: string }) => void;
+  "trial:defense": (payload: { text: string }) => void;
+  "trial:continue": () => void;
 
   "evidence:list": (ack: (recordings: TurnRecording[]) => void) => void;
 
@@ -203,10 +267,10 @@ export interface ServerToClientEvents {
 
   "word:choices": (payload: { choices: string[]; expiresAt: number }) => void;
 
-  "draw:action": (payload: DrawingAction) => void;
-  "draw:undo": () => void;
-  "draw:clear": () => void;
-  "draw:canvasSync": (payload: { actions: DrawingAction[] }) => void;
+  "draw:action": (payload: DrawingAction, canvas: CanvasId) => void;
+  "draw:undo": (canvas: CanvasId) => void;
+  "draw:clear": (canvas: CanvasId) => void;
+  "draw:canvasSync": (payload: { a: DrawingAction[]; b: DrawingAction[] }) => void;
 
   "chat:new": (entry: ChatEntry) => void;
   "chat:privateHint": (payload: { text: string }) => void;
@@ -224,6 +288,7 @@ export interface ServerToClientEvents {
   "sfx": (payload: { name: "typewriter" | "gavel" | "shutter" | "stamp" | "tada" | "snitch" }) => void;
 
   "snitch:assigned": (payload: { sabotageWindowMs: number }) => void;
+  "alibi:assigned": (payload: { category: string }) => void;
 }
 
 export const SOCKET_PATH = "/api/socket";

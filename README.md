@@ -4,8 +4,9 @@ Noir-themed real-time drawing & guessing party game. Server is authoritative —
 
 **Live:** https://doodlecrime.vercel.app (Next.js frontend on Vercel + Socket.IO server on Render — see "Deployment" below for why it's split).
 
-- Phase 1: rooms, lobby, canvas sync, guessing, scoring, the full game state machine (`LOBBY → PICK_WORD → DRAWING → ROUND_REVEAL → ... → GAME_OVER`).
+- Phase 1: rooms, lobby, canvas sync, guessing, scoring, the full game state machine (`LOBBY → PICK_WORD → DRAWING → ROUND_REVEAL → ... → TRIAL → GAME_OVER`).
 - Phase 2: Sentences (drawer handicaps), The Snitch, Evidence Tape replay/export.
+- Phase 3: Bribe Economy (Dirty Ink shop), Alibi Mode (split-canvas fake drawer), The Trial (AI judge).
 
 ## Run it
 
@@ -41,20 +42,26 @@ Open `http://localhost:3000` in multiple browser tabs (or windows/devices on the
 - **The Snitch**: one guesser is secretly assigned as the Snitch each turn. They get one 3-second sabotage stroke (briefly takes over drawing rights) and can send "decoy" guesses that look like real ones. At round end, everyone votes on who they think the Snitch was — correct accusers and an undetected Snitch both score bonus points.
 - **Evidence Tape**: every completed drawing is recorded and replayable as a timelapse ("EXHIBIT A" stamp + watermark), exportable as a GIF, and browsable after the game in the "Evidence Locker."
 
+## Phase 3 features (behind lobby toggles)
+
+- **Bribe Economy**: correct guesses earn "Dirty Ink" currency. Spend it in the Bribe Shop: buy a private letter hint (40 ink), curse the current leader with a forced Sentence on their next turn (60 ink), or bribe the judge for double points on your next correct guess — 20% chance you're caught and lose both the ink and the points (50 ink).
+- **Alibi Mode**: each turn, a second "fake" drawer is secretly picked from the guessers. They see the word's category (the prompt pack name) but not the actual word, and draw on their own split canvas next to the real drawer's. After guessing, everyone votes on which of the two was the fake — correct accusers and an undetected fake both score bonus points.
+- **The Trial**: after the final round, players vote for the 3 worst drawings of the game. Each defendant gets 15 seconds to type a defense, then an AI judge (Claude, via the Anthropic API) delivers a short, funny, non-mean verdict and silly "sentence" for each. Falls back to canned silly verdicts if `ANTHROPIC_API_KEY` isn't set on the socket server — set it on Render to get real AI-generated verdicts.
+
 ## What's implemented vs. deferred
 
-Built now: Socket.IO server-authoritative rooms (in-memory store — see `lib/roomStore.ts`), the full state machine (`lib/gameEngine.ts`), guess matching with Levenshtein "close" hints, progressive letter hints, speed-based scoring, 6 prompt packs (100 phrases each) + custom packs, canvas sync via compressed stroke/fill actions (not images), drawing tools (brush, eraser, 12-color palette, fill bucket, undo, clear), chat/draw rate limiting, a profanity filter toggle, reconnect-with-grace-period, and the three Phase 2 features above.
+Built now: Socket.IO server-authoritative rooms (in-memory store — see `lib/roomStore.ts`), the full state machine (`lib/gameEngine.ts`), guess matching with Levenshtein "close" hints, progressive letter hints, speed-based scoring, 6 prompt packs (100 phrases each) + custom packs, canvas sync via compressed stroke/fill actions (not images), drawing tools (brush, eraser, 12-color palette, fill bucket, undo, clear), chat/draw rate limiting, a profanity filter toggle, reconnect-with-grace-period, and all Phase 2 + Phase 3 features above.
 
-Deferred to later phases per the build order: Redis-backed room state (currently in-process `Map`, fine for a single server instance — swap `lib/roomStore.ts` for a Redis-backed version when you need multi-instance scaling), Postgres/Supabase persistence (Rap Sheet, Lore Engine), Bribe Economy, Alibi Mode, The Trial + AI judge, and real audio assets (current SFX are synthesized WebAudio beeps as placeholders for the described typewriter/gavel/shutter sounds).
+Deferred: Redis-backed room state (currently in-process `Map`, fine for a single server instance — swap `lib/roomStore.ts` for a Redis-backed version when you need multi-instance scaling), Postgres/Supabase persistence (Rap Sheet, Lore Engine, accounts), and real audio assets (current SFX are synthesized WebAudio beeps as placeholders for the described typewriter/gavel/shutter sounds).
 
-Known gap: the purely visual/client-only Phase 2 bits (mirrored/jitter/shrinking-canvas rendering, GIF export output) haven't been eyeballed in a real browser — this was built in an environment with no browser automation available. Everything server-authoritative was verified directly via live socket simulations, including against the production deployment.
+Known gap: the purely visual/client-only bits (mirrored/jitter/shrinking-canvas rendering, dual-canvas layout, GIF export output, courtroom UI) haven't been eyeballed in a real browser — this was built in an environment with no browser automation available. Everything server-authoritative — including the full Bribe Economy, Alibi Mode canvas-permission logic, and Trial voting/defense/verdict flow — was verified directly via live socket simulations, including against the production deployment.
 
 ## Deployment
 
 The app is split across two services because Socket.IO needs a persistent process with in-memory room state, which serverless platforms (Vercel) don't support:
 
 - **Frontend** (`doodlecrime.vercel.app`): the Next.js app, deployed to Vercel from this repo as usual (`vercel --prod`). Reads `NEXT_PUBLIC_SOCKET_URL` at build time to know where the socket server lives.
-- **Socket server** (`doodlecrime-socket.onrender.com`): `server/socket-only.ts`, a bare Socket.IO server with no Next.js, deployed to Render from this same repo (see `render.yaml`). Configured via `ALLOWED_ORIGIN` (CORS) and runs `npm run start:socket`.
+- **Socket server** (`doodlecrime-socket.onrender.com`): `server/socket-only.ts`, a bare Socket.IO server with no Next.js, deployed to Render from this same repo (see `render.yaml`). Configured via `ALLOWED_ORIGIN` (CORS) and runs `npm run start:socket`. Optionally set `ANTHROPIC_API_KEY` on it for real AI-generated Trial verdicts (falls back to canned ones otherwise).
 
 To redeploy either side after a change:
 ```bash
