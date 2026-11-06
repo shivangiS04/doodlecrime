@@ -1,6 +1,11 @@
-# Doodle Crimes — Phase 1
+# Doodle Crimes
 
-Noir-themed drawing & guessing party game. Phase 1 scope: rooms, lobby, canvas sync, guessing, scoring, and the full game state machine (`LOBBY → PICK_WORD → DRAWING → ROUND_REVEAL → ... → GAME_OVER`). Server is authoritative — the secret word is only ever sent to the current drawer's socket.
+Noir-themed real-time drawing & guessing party game. Server is authoritative — the secret word is only ever sent to the current drawer's socket.
+
+**Live:** https://doodlecrime.vercel.app (Next.js frontend on Vercel + Socket.IO server on Render — see "Deployment" below for why it's split).
+
+- Phase 1: rooms, lobby, canvas sync, guessing, scoring, the full game state machine (`LOBBY → PICK_WORD → DRAWING → ROUND_REVEAL → ... → GAME_OVER`).
+- Phase 2: Sentences (drawer handicaps), The Snitch, Evidence Tape replay/export.
 
 ## Run it
 
@@ -30,8 +35,34 @@ Open `http://localhost:3000` in multiple browser tabs (or windows/devices on the
 - **Rate limits**: spamming chat or strokes is throttled server-side.
 - **Custom prompts**: in the lobby, set the pack to "Custom" and paste a comma-separated word list.
 
+## Phase 2 features (behind lobby toggles)
+
+- **Sentences**: a random drawer handicap each turn — ink meter (limited total stroke length), one continuous line, blind canvas (drawer can't see their own sheet), mirrored input, jitter ("the shakes"), or a canvas that shrinks every 10s. Shown to everyone with a stamp-animated banner.
+- **The Snitch**: one guesser is secretly assigned as the Snitch each turn. They get one 3-second sabotage stroke (briefly takes over drawing rights) and can send "decoy" guesses that look like real ones. At round end, everyone votes on who they think the Snitch was — correct accusers and an undetected Snitch both score bonus points.
+- **Evidence Tape**: every completed drawing is recorded and replayable as a timelapse ("EXHIBIT A" stamp + watermark), exportable as a GIF, and browsable after the game in the "Evidence Locker."
+
 ## What's implemented vs. deferred
 
-Built now: Socket.IO server-authoritative rooms (in-memory store — see `lib/roomStore.ts`), the full state machine (`lib/gameEngine.ts`), guess matching with Levenshtein "close" hints, progressive letter hints, speed-based scoring, 6 prompt packs (100 phrases each) + custom packs, canvas sync via compressed stroke/fill actions (not images), drawing tools (brush, eraser, 12-color palette, fill bucket, undo, clear), chat/draw rate limiting, a profanity filter toggle, and reconnect-with-grace-period.
+Built now: Socket.IO server-authoritative rooms (in-memory store — see `lib/roomStore.ts`), the full state machine (`lib/gameEngine.ts`), guess matching with Levenshtein "close" hints, progressive letter hints, speed-based scoring, 6 prompt packs (100 phrases each) + custom packs, canvas sync via compressed stroke/fill actions (not images), drawing tools (brush, eraser, 12-color palette, fill bucket, undo, clear), chat/draw rate limiting, a profanity filter toggle, reconnect-with-grace-period, and the three Phase 2 features above.
 
-Deferred to later phases per the build order: Redis-backed room state (currently in-process `Map`, fine for a single server instance — swap `lib/roomStore.ts` for a Redis-backed version when you need multi-instance scaling), Postgres/Supabase persistence (Rap Sheet, Lore Engine), Sentences handicaps, The Snitch, Evidence Tape replay/export, Bribe Economy, Alibi Mode, The Trial + AI judge, and real audio assets (current SFX are synthesized WebAudio beeps as placeholders for the described typewriter/gavel/shutter sounds).
+Deferred to later phases per the build order: Redis-backed room state (currently in-process `Map`, fine for a single server instance — swap `lib/roomStore.ts` for a Redis-backed version when you need multi-instance scaling), Postgres/Supabase persistence (Rap Sheet, Lore Engine), Bribe Economy, Alibi Mode, The Trial + AI judge, and real audio assets (current SFX are synthesized WebAudio beeps as placeholders for the described typewriter/gavel/shutter sounds).
+
+Known gap: the purely visual/client-only Phase 2 bits (mirrored/jitter/shrinking-canvas rendering, GIF export output) haven't been eyeballed in a real browser — this was built in an environment with no browser automation available. Everything server-authoritative was verified directly via live socket simulations, including against the production deployment.
+
+## Deployment
+
+The app is split across two services because Socket.IO needs a persistent process with in-memory room state, which serverless platforms (Vercel) don't support:
+
+- **Frontend** (`doodlecrime.vercel.app`): the Next.js app, deployed to Vercel from this repo as usual (`vercel --prod`). Reads `NEXT_PUBLIC_SOCKET_URL` at build time to know where the socket server lives.
+- **Socket server** (`doodlecrime-socket.onrender.com`): `server/socket-only.ts`, a bare Socket.IO server with no Next.js, deployed to Render from this same repo (see `render.yaml`). Configured via `ALLOWED_ORIGIN` (CORS) and runs `npm run start:socket`.
+
+To redeploy either side after a change:
+```bash
+# Frontend
+vercel --prod
+
+# Socket server — Render auto-deploys on push to main (autoDeployTrigger: commit)
+git push origin main
+```
+
+For local dev, `npm run dev` runs both together in one combined process (`server/index.ts`) — no split needed locally. To test the split setup locally, run `npm run dev:socket` (socket server on :4000) alongside `NEXT_PUBLIC_SOCKET_URL=http://localhost:4000 npx next dev -p 3001`.

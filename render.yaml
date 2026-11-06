@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: doodlecrime-socket
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run start:socket
+    envVars:
+      - key: ALLOWED_ORIGIN
+        value: https://doodlecrime.vercel.app
+      - key: NODE_VERSION
+        value: 20
